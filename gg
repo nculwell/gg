@@ -37,7 +37,7 @@
 # $ gg merge
 #
 # Push the current branch to all collab and mirror remotes.
-# $ gg push
+# $ gg push [-f]
 #
 # Pull the current branch from all collab remotes.
 # $ gg pull
@@ -64,30 +64,349 @@
 # Database setup
 DB_SCHEMA = """
 
-create table branch (
+create table if not exists branch (
     repo_id integer,
     branch_name text,
     branch_base text,
     branch_type text, -- MAIN, PROJECT, STORY
     branch_is_mirror integer, -- bool
     branch_is_collab integer, -- bool
-    primary key (branch_name)
+    primary key (repo_id, branch_name)
 );
 
-create table repo (
+create table if not exists repo (
     repo_id integer,
     repo_root_path text,
     primary key (repo_id)
 );
-create unique index ix_repo_root on repo (repo_root_path)
+create unique index if not exists ix_repo_root on repo (repo_root_path);
 
 """
 
-import os, sys, re, subprocess
+import os, sys, re, subprocess, sqlite3, argparse
 
-def git(args):
-    proc = subprocess.run("git", *args, capture_output=True, text=True)
+DEFAULT_DB_PATH = os.path.join(
+    os.path.expanduser("~"), ".local", "state", "gg", "repos.sqlite")
+
+# Directories that `repo scan` never descends into.
+SCAN_SKIP_DIRS = {"node_modules"}
+
+class GGError(Exception):
+    pass
+
+# Git helpers
+
+def git(args, cwd=None):
+    """Run git and return its stdout. Raises GGError on failure."""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise Exception("Git failed.", proc.stderr)
+        raise GGError("git %s failed:\n%s" % (" ".join(args), proc.stderr.strip()))
     return proc.stdout
+
+def git_try(args, cwd=None):
+    """Run git and return its stripped stdout, or None on failure."""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+def git_run(args, cwd=None):
+    """Run git attached to the terminal (for interactive/long-running commands)."""
+    print("+ git " + " ".join(args), file=sys.stderr)
+    proc = subprocess.run(["git", *args], cwd=cwd)
+    if proc.returncode != 0:
+        raise GGError("git %s failed." % " ".join(args))
+
+def repo_root(path):
+    if not os.path.isdir(path):
+        raise GGError("Not a directory: %s" % path)
+    root = git_try(["rev-parse", "--show-toplevel"], cwd=path)
+    if not root:
+        raise GGError("Not a git repo: %s" % path)
+    return os.path.realpath(root)
+
+def current_branch(root):
+    name = git_try(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
+    if not name:
+        raise GGError("HEAD is detached; not on a branch.")
+    return name
+
+def upstream_remote(root, branch):
+    """The remote the branch tracks, defaulting to origin."""
+    remote = git_try(["config", "--get", "branch.%s.remote" % branch], cwd=root)
+    if not remote or remote == ".":
+        return "origin"
+    return remote
+
+def collab_remotes(root, branch):
+    # TODO: Use remote attributes once `gg repo remote` is implemented.
+    return [upstream_remote(root, branch)]
+
+def mirror_remotes(root, branch):
+    # TODO: Use remote attributes once `gg repo remote` is implemented.
+    return []
+
+# DB helpers
+
+def open_db(path):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    db.executescript(DB_SCHEMA)
+    return db
+
+def add_repo(db, root):
+    """Register a repo root. Returns (repo_id, was_added)."""
+    row = db.execute("select repo_id from repo where repo_root_path = ?",
+                     (root,)).fetchone()
+    if row is not None:
+        return row["repo_id"], False
+    cur = db.execute("insert into repo (repo_root_path) values (?)", (root,))
+    db.commit()
+    return cur.lastrowid, True
+
+def open_repo(db, path="."):
+    """Resolve the repo containing path, registering it if needed."""
+    root = repo_root(path)
+    repo_id, _ = add_repo(db, root)
+    return root, repo_id
+
+def get_branch(db, repo_id, name):
+    return db.execute(
+        "select * from branch where repo_id = ? and branch_name = ?",
+        (repo_id, name)).fetchone()
+
+def require_base(db, root, repo_id):
+    """Return (branch, base) for the current branch, which must have a base."""
+    name = current_branch(root)
+    row = get_branch(db, repo_id, name)
+    if row is None or not row["branch_base"]:
+        raise GGError("Branch %s has no base recorded in gg." % name)
+    return name, row["branch_base"]
+
+# Commands
+
+def cmd_info(db, args):
+    root, repo_id = open_repo(db, args.path or ".")
+    print("Repo:     %s" % root)
+    name = git_try(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
+    if not name:
+        print("Branch:   (detached HEAD)")
+        return
+    print("Branch:   %s" % name)
+    upstream = git_try(["rev-parse", "--abbrev-ref", "%s@{upstream}" % name], cwd=root)
+    print("Upstream: %s" % (upstream or "(none)"))
+    row = get_branch(db, repo_id, name)
+    if row is None:
+        print("Type:     (not tracked by gg)")
+        return
+    print("Type:     %s" % (row["branch_type"] or "?"))
+    base = row["branch_base"]
+    print("Base:     %s" % (base or "(none)"))
+    if base:
+        counts = git_try(["rev-list", "--left-right", "--count",
+                          "%s...%s" % (base, name)], cwd=root)
+        if counts:
+            behind, ahead = counts.split()
+            print("vs base:  %s ahead, %s behind" % (ahead, behind))
+
+def cmd_branch(db, args):
+    root, repo_id = open_repo(db)
+    base_row = get_branch(db, repo_id, args.base)
+    if base_row is not None and base_row["branch_type"] == "STORY":
+        if not base_row["branch_base"]:
+            raise GGError("Story branch %s has no base recorded." % args.base)
+        new_base = base_row["branch_base"]
+    else:
+        new_base = args.base
+    git_run(["switch", "-c", args.new, args.base], cwd=root)
+    db.execute(
+        "insert or replace into branch (repo_id, branch_name, branch_base,"
+        " branch_type, branch_is_mirror, branch_is_collab)"
+        " values (?, ?, ?, 'STORY', 0, 0)",
+        (repo_id, args.new, new_base))
+    db.commit()
+    git_run(["push", "-u", "origin", args.new], cwd=root)
+    print("Created %s with base %s." % (args.new, new_base))
+
+def cmd_rebase(db, args):
+    root, repo_id = open_repo(db)
+    _, base = require_base(db, root, repo_id)
+    git_run(["rebase"] + (["-i"] if args.interactive else []) + [base], cwd=root)
+
+def cmd_merge(db, args):
+    root, repo_id = open_repo(db)
+    _, base = require_base(db, root, repo_id)
+    git_run(["merge", base], cwd=root)
+
+def cmd_push(db, args):
+    root = repo_root(".")
+    name = current_branch(root)
+    remotes = collab_remotes(root, name)
+    remotes += [r for r in mirror_remotes(root, name) if r not in remotes]
+    force = ["--force-with-lease"] if args.force else []
+    for remote in remotes:
+        git_run(["push"] + force + [remote, name], cwd=root)
+
+def cmd_pull(db, args):
+    root = repo_root(".")
+    name = current_branch(root)
+    for remote in collab_remotes(root, name):
+        git_run(["pull", remote, name], cwd=root)
+
+def cmd_fetch(db, args):
+    git_run(["fetch", "--all", "--prune"], cwd=repo_root("."))
+
+def cmd_repo_add(db, args):
+    root = repo_root(args.path)
+    repo_id, added = add_repo(db, root)
+    print("%s repo %d: %s" % ("Added" if added else "Already known:", repo_id, root))
+
+def cmd_repo_scan(db, args):
+    top = os.path.realpath(args.path)
+    if not os.path.isdir(top):
+        raise GGError("Not a directory: %s" % args.path)
+    top_depth = top.rstrip(os.sep).count(os.sep)
+    added = known = 0
+    for dirpath, dirnames, filenames in os.walk(top):
+        if ".git" in dirnames or ".git" in filenames:
+            dirnames[:] = []
+            try:
+                repo_id, was_added = add_repo(db, repo_root(dirpath))
+            except GGError as e:
+                print("Skipping %s: %s" % (dirpath, e), file=sys.stderr)
+                continue
+            if was_added:
+                added += 1
+                print("Added repo %d: %s" % (repo_id, dirpath))
+            else:
+                known += 1
+            continue
+        depth = dirpath.rstrip(os.sep).count(os.sep) - top_depth
+        if args.max_depth is not None and depth >= args.max_depth:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [d for d in dirnames
+                           if not d.startswith(".") and d not in SCAN_SKIP_DIRS]
+    print("%d repo(s) added, %d already known." % (added, known))
+
+def cmd_repo_list(db, args):
+    for row in db.execute("select repo_id, repo_root_path from repo"
+                          " order by repo_root_path"):
+        path = row["repo_root_path"]
+        missing = "" if os.path.isdir(path) else "  (missing)"
+        print("%4d  %s%s" % (row["repo_id"], path, missing))
+
+def cmd_repo_branches(db, args):
+    root, repo_id = open_repo(db, args.path or ".")
+    current = git_try(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
+    local = git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+                cwd=root).split()
+    rows = {row["branch_name"]: row for row in db.execute(
+        "select * from branch where repo_id = ?", (repo_id,))}
+    names = sorted(set(local) | set(rows))
+    if not names:
+        print("No branches.")
+        return
+    width = max(len(n) for n in names)
+    for name in names:
+        marker = "*" if name == current else " "
+        row = rows.get(name)
+        if row is None:
+            info = "(untracked)"
+        else:
+            info = "%-7s  base: %s" % (row["branch_type"] or "?",
+                                       row["branch_base"] or "(none)")
+            if name not in local:
+                info += "  (gone)"
+        print("%s %-*s  %s" % (marker, width, name, info))
+
+# Argument parsing
+
+COMMANDS = {"info", "branch", "rebase", "merge", "push", "pull", "fetch", "repo"}
+
+def normalize_argv(argv):
+    """Allow `gg [<repo-root-path>]` by inserting the implicit `info` command."""
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("-d", "--db"):
+            i += 2
+        elif argv[i].startswith("-"):
+            i += 1
+        else:
+            break
+    if i >= len(argv) or argv[i] not in COMMANDS:
+        argv = argv[:i] + ["info"] + argv[i:]
+    return argv
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="gg", description="Greater Git")
+    parser.add_argument("-d", "--db", default=DEFAULT_DB_PATH,
+                        help="gg DB path (default: %(default)s)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("info", help="show info about the current branch")
+    p.add_argument("path", nargs="?")
+    p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser("branch", help="create a branch from a base and push it")
+    p.add_argument("base")
+    p.add_argument("new")
+    p.set_defaults(func=cmd_branch)
+
+    p = sub.add_parser("rebase", help="rebase the current branch against its base")
+    p.add_argument("-i", "--interactive", action="store_true")
+    p.set_defaults(func=cmd_rebase)
+
+    p = sub.add_parser("merge", help="merge the current branch's base onto it")
+    p.set_defaults(func=cmd_merge)
+
+    p = sub.add_parser("push", help="push to collab and mirror remotes")
+    p.add_argument("-f", "--force", action="store_true",
+                   help="push with --force-with-lease")
+    p.set_defaults(func=cmd_push)
+
+    p = sub.add_parser("pull", help="pull from collab remotes")
+    p.set_defaults(func=cmd_pull)
+
+    p = sub.add_parser("fetch", help="fetch all remotes")
+    p.set_defaults(func=cmd_fetch)
+
+    repo = sub.add_parser("repo", help="manage repos in the gg DB")
+    repo_sub = repo.add_subparsers(dest="repo_command", required=True)
+
+    p = repo_sub.add_parser("scan", help="find git repos under a path")
+    p.add_argument("--max-depth", type=int)
+    p.add_argument("path")
+    p.set_defaults(func=cmd_repo_scan)
+
+    p = repo_sub.add_parser("add", help="add a repo")
+    p.add_argument("path")
+    p.set_defaults(func=cmd_repo_add)
+
+    p = repo_sub.add_parser("list", help="list repos")
+    p.set_defaults(func=cmd_repo_list)
+
+    p = repo_sub.add_parser("branches", help="show branches in a repo")
+    p.add_argument("path", nargs="?")
+    p.set_defaults(func=cmd_repo_branches)
+
+    return parser
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    args = build_parser().parse_args(normalize_argv(argv))
+    try:
+        db = open_db(args.db)
+        args.func(db, args)
+    except GGError as e:
+        print("gg: %s" % e, file=sys.stderr)
+        return 1
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
 
