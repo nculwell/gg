@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+# vim: et ts=8 sts=4 sw=4
+
+# GREATER GIT
+#
+# This is a tool for automating various tasks with Git. The most important
+# feature is that it assigns each branch a "base" that is not its upstream.
+# This allows us to set its upstream to a corresponding remote branch
+# (typically origin/my-branch-name) while saving which branch it should rebase
+# against.
+#
+# Extra branch info is stored in a sqlite3 database. The user has one central
+# DB that tracks branches for all repos.
+
+# = USAGE EXAMPLES =
+#
+# == UNIVERSAL OPTIONS ==
+#
+# Override the default gg DB path:
+# -d <db-path> | --db <db-path>
+# (The default path is: $HOME/.local/state/gg/repos.sqlite)
+#
+# == COMMANDS ==
+#
+# Show info about the current branch in the given repo (default = cwd).
+# $ gg [<repo-root-path>]
+#
+# Create a new branch from the specified base, and push it to origin. If the
+# base is a MAIN or PROJECT branch, the new branch gets that branch as its
+# base. If the base is a STORY branch, the new branch copies the base's base.
+# $ gg branch <base-branch-name> <new-branch-name>
+#
+# Rebase the current branch against its base.
+# $ gg rebase [-i]
+#
+# Merge the current branch's base onto it.
+# $ gg merge
+#
+# Push the current branch to all collab and mirror remotes.
+# $ gg push
+#
+# Pull the current branch from all collab remotes.
+# $ gg pull
+#
+# Fetch all remotes.
+# $ gg fetch
+# 
+# Scan the given path and subdirs for any git repos to add to the database.
+# $ gg repo scan [--max-depth n] <scan-path>
+#
+# Add the specified repo to the database.
+# $ gg repo add <repo-root-path>
+#
+# Add/remove type(s) and/or attribute(s) for the specified remote.
+# Types are: MAIN, PROJECT, STORY. Attributes are MIRROR, COLLAB.
+# $ gg repo remote <remote-name> [+<type>] [...] [-<type>] [...]
+#
+# List all repos in the DB.
+# $ gg repo list
+# 
+# Show info about branches in the given repo (
+# $ gg repo branches [<repo-root-path>]
+
+# Database setup
+DB_SCHEMA = """
+
+create table branch (
+    repo_id integer,
+    branch_name text,
+    branch_base text,
+    branch_type text, -- MAIN, PROJECT, STORY
+    branch_is_mirror integer, -- bool
+    branch_is_collab integer, -- bool
+    primary key (branch_name)
+);
+
+create table repo (
+    repo_id integer,
+    repo_root_path text,
+    primary key (repo_id)
+);
+create unique index ix_repo_root on repo (repo_root_path)
+
+"""
+
+import os, sys, re, subprocess
+
+def git(args):
+    proc = subprocess.run("git", *args, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Exception("Git failed.", proc.stderr)
+    return proc.stdout
+
