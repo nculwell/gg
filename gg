@@ -43,8 +43,9 @@ import sys
 # Merge the current branch's base onto it.
 # $ gg merge
 #
-# Push the current branch to all collab and mirror remotes.
-# $ gg push [-f]
+# Push the current branch to the given remote, or by default to all collab and
+# mirror remotes.
+# $ gg push [-f] [<remote>]
 #
 # Pull the current branch from all collab remotes.
 # $ gg pull
@@ -158,7 +159,11 @@ _gg() {
         rebase)
             COMPREPLY=($(compgen -W "-i --interactive" -- "$cur")) ;;
         push)
-            COMPREPLY=($(compgen -W "-f --force" -- "$cur")) ;;
+            if [[ $cur == -* ]]; then
+                COMPREPLY=($(compgen -W "-f --force" -- "$cur"))
+            else
+                COMPREPLY=($(compgen -W "$(git remote 2>/dev/null)" -- "$cur"))
+            fi ;;
         completion)
             COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
         repo)
@@ -391,8 +396,11 @@ def cmd_merge(db, args):
 def cmd_push(db, args):
     root = repo_root(".")
     name = current_branch(root)
-    remotes = collab_remotes(root, name)
-    remotes += [r for r in mirror_remotes(root, name) if r not in remotes]
+    if args.remote:
+        remotes = [args.remote]
+    else:
+        remotes = collab_remotes(root, name)
+        remotes += [r for r in mirror_remotes(root, name) if r not in remotes]
     force = ["--force-with-lease"] if args.force else []
     for remote in remotes:
         git_run(["push"] + force + [remote, name], cwd=root)
@@ -579,12 +587,19 @@ def build_parser():
     p = sub.add_parser("merge", help="merge the current branch's base onto it")
     p.set_defaults(func=cmd_merge)
 
-    p = sub.add_parser("push", help="push to collab and mirror remotes")
+    p = sub.add_parser(
+        "push", help="push to a remote, or to collab and mirror remotes"
+    )
     p.add_argument(
         "-f",
         "--force",
         action="store_true",
         help="push with --force-with-lease",
+    )
+    p.add_argument(
+        "remote",
+        nargs="?",
+        help="remote to push to (default: collab and mirror remotes)",
     )
     p.set_defaults(func=cmd_push)
 
