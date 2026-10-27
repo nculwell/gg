@@ -22,7 +22,8 @@
 #
 # == COMMANDS ==
 #
-# Show info about the current branch in the given repo (default = cwd).
+# Show info about the current branch in the given repo (default = current
+# repo).
 # $ gg [<repo-root-path>]
 #
 # Create a new branch from the specified base, and push it to origin. If the
@@ -48,8 +49,8 @@
 # Scan the given path and subdirs for any git repos to add to the database.
 # $ gg repo scan [--max-depth n] <scan-path>
 #
-# Add the specified repo to the database.
-# $ gg repo add <repo-root-path>
+# Add the specified repo (default: the one containing the cwd) to the database.
+# $ gg repo init [<repo-path>]
 #
 # Add/remove type(s) and/or attribute(s) for the specified remote.
 # Types are: MAIN, PROJECT, STORY. Attributes are MIRROR, COLLAB.
@@ -259,8 +260,8 @@ def cmd_pull(db, args):
 def cmd_fetch(db, args):
     git_run(["fetch", "--all", "--prune"], cwd=repo_root("."))
 
-def cmd_repo_add(db, args):
-    root = repo_root(args.path)
+def cmd_repo_init(db, args):
+    root = repo_root(args.path or ".")
     repo_id, added = add_repo(db, root)
     print("%s repo %d: %s" % ("Added" if added else "Already known:", repo_id, root))
 
@@ -382,9 +383,9 @@ def build_parser():
     p.add_argument("path")
     p.set_defaults(func=cmd_repo_scan)
 
-    p = repo_sub.add_parser("add", help="add a repo")
-    p.add_argument("path")
-    p.set_defaults(func=cmd_repo_add)
+    p = repo_sub.add_parser("init", help="add a repo (default: current one)")
+    p.add_argument("path", nargs="?")
+    p.set_defaults(func=cmd_repo_init)
 
     p = repo_sub.add_parser("list", help="list repos")
     p.set_defaults(func=cmd_repo_list)
