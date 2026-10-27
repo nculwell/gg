@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # vim: et ts=8 sts=4 sw=4
 
+import argparse
+import os
+import sqlite3
+import subprocess
+import sys
+
 # GREATER GIT
 #
 # This is a tool for automating various tasks with Git. The most important
@@ -89,8 +95,6 @@ create table if not exists repo (
 create unique index if not exists ix_repo_root on repo (repo_root_path);
 
 """
-
-import os, sys, re, subprocess, sqlite3, argparse
 
 DEFAULT_DB_PATH = os.path.join(
     os.path.expanduser("~"), ".local", "state", "gg", "repos.sqlite"
@@ -190,7 +194,7 @@ class GGError(Exception):
 def git(args, cwd=None):
     """Run git and return its stdout. Raises GGError on failure."""
     proc = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
         raise GGError(
@@ -202,7 +206,7 @@ def git(args, cwd=None):
 def git_try(args, cwd=None):
     """Run git and return its stripped stdout, or None on failure."""
     proc = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
         return None
@@ -212,7 +216,7 @@ def git_try(args, cwd=None):
 def git_run(args, cwd=None):
     """Run git attached to the terminal (interactive/long-running use)."""
     print("+ git " + " ".join(args), file=sys.stderr)
-    proc = subprocess.run(["git", *args], cwd=cwd)
+    proc = subprocess.run(["git", *args], cwd=cwd, check=False)
     if proc.returncode != 0:
         raise GGError("git %s failed." % " ".join(args))
 

@@ -5,3 +5,5 @@ extend-include = ["gg"]
 
 [lint]
 extend-select = ["E501"]
+# printf-style % formatting is fine.
+ignore = ["UP031"]
