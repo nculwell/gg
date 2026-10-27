@@ -43,13 +43,13 @@ import sys
 # Merge the current branch's base onto it.
 # $ gg merge
 #
-# Push the current branch to the given remote, or by default to all collab and
-# mirror remotes.
-# $ gg push [-f] [<remote>]
+# Push the given branch (default: the current one) to the given remote, or by
+# default to all collab and mirror remotes.
+# $ gg push [-f] [<remote> [<branch>]]
 #
-# Pull the current branch from the given remote, or by default from all collab
-# remotes.
-# $ gg pull [<remote>]
+# Pull the given branch (default: the current one) from the given remote, or by
+# default from all collab remotes.
+# $ gg pull [<remote> [<branch>]]
 #
 # Fetch all remotes.
 # $ gg fetch
@@ -117,7 +117,7 @@ SCAN_SKIP_DIRS = {"node_modules"}
 
 BASH_COMPLETION = r"""
 _gg() {
-    local cur prev cmd sub i refs
+    local cur prev cmd sub i j refs nargs
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
 
@@ -159,14 +159,30 @@ _gg() {
             fi ;;
         rebase)
             COMPREPLY=($(compgen -W "-i --interactive" -- "$cur")) ;;
-        push)
-            if [[ $cur == -* ]]; then
+        push|pull)
+            if [[ $cmd == push && $cur == -* ]]; then
                 COMPREPLY=($(compgen -W "-f --force" -- "$cur"))
-            else
+                return
+            fi
+            # Count the positional args before the current word.
+            nargs=0
+            for (( j = i + 1; j < COMP_CWORD; j++ )); do
+                [[ ${COMP_WORDS[j]} == -* ]] || (( nargs++ ))
+            done
+            if (( nargs == 0 )); then
                 COMPREPLY=($(compgen -W "$(git remote 2>/dev/null)" -- "$cur"))
+            elif (( nargs == 1 )); then
+                if [[ $cmd == push ]]; then
+                    refs=$(git for-each-ref --format='%(refname:short)' \
+                        refs/heads 2>/dev/null)
+                else
+                    # Branches on the chosen remote, without its prefix.
+                    refs=$(git for-each-ref --format='%(refname:lstrip=3)' \
+                        "refs/remotes/${COMP_WORDS[COMP_CWORD-1]}" \
+                        2>/dev/null | grep -vx HEAD)
+                fi
+                COMPREPLY=($(compgen -W "$refs" -- "$cur"))
             fi ;;
-        pull)
-            COMPREPLY=($(compgen -W "$(git remote 2>/dev/null)" -- "$cur")) ;;
         completion)
             COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
         repo)
@@ -398,7 +414,7 @@ def cmd_merge(db, args):
 
 def cmd_push(db, args):
     root = repo_root(".")
-    name = current_branch(root)
+    name = args.branch or current_branch(root)
     if args.remote:
         remotes = [args.remote]
     else:
@@ -411,7 +427,7 @@ def cmd_push(db, args):
 
 def cmd_pull(db, args):
     root = repo_root(".")
-    name = current_branch(root)
+    name = args.branch or current_branch(root)
     remotes = [args.remote] if args.remote else collab_remotes(root, name)
     for remote in remotes:
         git_run(["pull", remote, name], cwd=root)
@@ -605,6 +621,9 @@ def build_parser():
         nargs="?",
         help="remote to push to (default: collab and mirror remotes)",
     )
+    p.add_argument(
+        "branch", nargs="?", help="branch to push (default: current branch)"
+    )
     p.set_defaults(func=cmd_push)
 
     p = sub.add_parser(
@@ -614,6 +633,9 @@ def build_parser():
         "remote",
         nargs="?",
         help="remote to pull from (default: collab remotes)",
+    )
+    p.add_argument(
+        "branch", nargs="?", help="branch to pull (default: current branch)"
     )
     p.set_defaults(func=cmd_pull)
 
