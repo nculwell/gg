@@ -47,8 +47,9 @@ import sys
 # mirror remotes.
 # $ gg push [-f] [<remote>]
 #
-# Pull the current branch from all collab remotes.
-# $ gg pull
+# Pull the current branch from the given remote, or by default from all collab
+# remotes.
+# $ gg pull [<remote>]
 #
 # Fetch all remotes.
 # $ gg fetch
@@ -164,6 +165,8 @@ _gg() {
             else
                 COMPREPLY=($(compgen -W "$(git remote 2>/dev/null)" -- "$cur"))
             fi ;;
+        pull)
+            COMPREPLY=($(compgen -W "$(git remote 2>/dev/null)" -- "$cur")) ;;
         completion)
             COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
         repo)
@@ -409,7 +412,8 @@ def cmd_push(db, args):
 def cmd_pull(db, args):
     root = repo_root(".")
     name = current_branch(root)
-    for remote in collab_remotes(root, name):
+    remotes = [args.remote] if args.remote else collab_remotes(root, name)
+    for remote in remotes:
         git_run(["pull", remote, name], cwd=root)
 
 
@@ -603,7 +607,14 @@ def build_parser():
     )
     p.set_defaults(func=cmd_push)
 
-    p = sub.add_parser("pull", help="pull from collab remotes")
+    p = sub.add_parser(
+        "pull", help="pull from a remote, or from collab remotes"
+    )
+    p.add_argument(
+        "remote",
+        nargs="?",
+        help="remote to pull from (default: collab remotes)",
+    )
     p.set_defaults(func=cmd_pull)
 
     p = sub.add_parser("fetch", help="fetch all remotes")
