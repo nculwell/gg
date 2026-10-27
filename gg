@@ -61,6 +61,11 @@
 # 
 # Show info about branches in the given repo (
 # $ gg repo branches [<repo-root-path>]
+#
+# Print a bash completion script. Load it from ~/.bashrc with:
+#   eval "$(gg completion)"
+# or install it to ~/.local/share/bash-completion/completions/gg with --install.
+# $ gg completion [--install]
 
 # Database setup
 DB_SCHEMA = """
@@ -89,8 +94,80 @@ import os, sys, re, subprocess, sqlite3, argparse
 DEFAULT_DB_PATH = os.path.join(
     os.path.expanduser("~"), ".local", "state", "gg", "repos.sqlite")
 
+COMPLETION_INSTALL_PATH = os.path.join(
+    os.path.expanduser("~"), ".local", "share", "bash-completion",
+    "completions", "gg")
+
 # Directories that `repo scan` never descends into.
 SCAN_SKIP_DIRS = {"node_modules"}
+
+BASH_COMPLETION = r"""
+_gg() {
+    local cur prev cmd sub i
+    cur=${COMP_WORDS[COMP_CWORD]}
+    prev=${COMP_WORDS[COMP_CWORD-1]}
+
+    if [[ $prev == -d || $prev == --db ]]; then
+        COMPREPLY=($(compgen -f -- "$cur"))
+        return
+    fi
+
+    # Find the command word, skipping global options.
+    i=1
+    while (( i < COMP_CWORD )); do
+        case ${COMP_WORDS[i]} in
+            -d|--db) (( i += 2 )) ;;
+            -*) (( i++ )) ;;
+            *) break ;;
+        esac
+    done
+    if (( i >= COMP_CWORD )); then
+        if [[ $cur == -* ]]; then
+            COMPREPLY=($(compgen -W "-d --db -h --help" -- "$cur"))
+        else
+            COMPREPLY=($(compgen -W "info branch rebase merge push pull fetch repo completion" -- "$cur"))
+            COMPREPLY+=($(compgen -d -- "$cur"))
+        fi
+        return
+    fi
+    cmd=${COMP_WORDS[i]}
+
+    case $cmd in
+        info)
+            COMPREPLY=($(compgen -d -- "$cur")) ;;
+        branch)
+            # Only the base is completable; the new name is free-form.
+            if (( COMP_CWORD == i + 1 )); then
+                COMPREPLY=($(compgen -W "$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null)" -- "$cur"))
+            fi ;;
+        rebase)
+            COMPREPLY=($(compgen -W "-i --interactive" -- "$cur")) ;;
+        push)
+            COMPREPLY=($(compgen -W "-f --force" -- "$cur")) ;;
+        completion)
+            COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
+        repo)
+            if (( COMP_CWORD == i + 1 )); then
+                COMPREPLY=($(compgen -W "scan init list branches" -- "$cur"))
+                return
+            fi
+            sub=${COMP_WORDS[i+1]}
+            case $sub in
+                scan)
+                    if [[ $prev == --max-depth ]]; then
+                        return
+                    elif [[ $cur == -* ]]; then
+                        COMPREPLY=($(compgen -W "--max-depth" -- "$cur"))
+                    else
+                        COMPREPLY=($(compgen -d -- "$cur"))
+                    fi ;;
+                init|branches)
+                    COMPREPLY=($(compgen -d -- "$cur")) ;;
+            esac ;;
+    esac
+}
+complete -o filenames -F _gg gg
+"""
 
 class GGError(Exception):
     pass
@@ -300,6 +377,15 @@ def cmd_repo_list(db, args):
         missing = "" if os.path.isdir(path) else "  (missing)"
         print("%4d  %s%s" % (row["repo_id"], path, missing))
 
+def cmd_completion(db, args):
+    if not args.install:
+        sys.stdout.write(BASH_COMPLETION.lstrip())
+        return
+    os.makedirs(os.path.dirname(COMPLETION_INSTALL_PATH), exist_ok=True)
+    with open(COMPLETION_INSTALL_PATH, "w") as f:
+        f.write(BASH_COMPLETION.lstrip())
+    print("Installed bash completion to %s" % COMPLETION_INSTALL_PATH)
+
 def cmd_repo_branches(db, args):
     root, repo_id = open_repo(db, args.path or ".")
     current = git_try(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
@@ -326,7 +412,8 @@ def cmd_repo_branches(db, args):
 
 # Argument parsing
 
-COMMANDS = {"info", "branch", "rebase", "merge", "push", "pull", "fetch", "repo"}
+COMMANDS = {"info", "branch", "rebase", "merge", "push", "pull", "fetch", "repo",
+            "completion"}
 
 def normalize_argv(argv):
     """Allow `gg [<repo-root-path>]` by inserting the implicit `info` command."""
@@ -374,6 +461,11 @@ def build_parser():
 
     p = sub.add_parser("fetch", help="fetch all remotes")
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("completion", help="print a bash completion script")
+    p.add_argument("--install", action="store_true",
+                   help="write it to %s instead" % COMPLETION_INSTALL_PATH)
+    p.set_defaults(func=cmd_completion)
 
     repo = sub.add_parser("repo", help="manage repos in the gg DB")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True)
