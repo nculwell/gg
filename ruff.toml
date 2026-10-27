@@ -1,0 +1,7 @@
+line-length = 79
+
+# `gg` has no .py extension, so ruff won't discover it on its own.
+extend-include = ["gg"]
+
+[lint]
+extend-select = ["E501"]

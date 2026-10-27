@@ -45,7 +45,7 @@
 #
 # Fetch all remotes.
 # $ gg fetch
-# 
+#
 # Scan the given path and subdirs for any git repos to add to the database.
 # $ gg repo scan [--max-depth n] <scan-path>
 #
@@ -58,13 +58,14 @@
 #
 # List all repos in the DB.
 # $ gg repo list
-# 
+#
 # Show info about branches in the given repo (
 # $ gg repo branches [<repo-root-path>]
 #
 # Print a bash completion script. Load it from ~/.bashrc with:
 #   eval "$(gg completion)"
-# or install it to ~/.local/share/bash-completion/completions/gg with --install.
+# or install it to ~/.local/share/bash-completion/completions/gg with
+# --install.
 # $ gg completion [--install]
 
 # Database setup
@@ -92,18 +93,24 @@ create unique index if not exists ix_repo_root on repo (repo_root_path);
 import os, sys, re, subprocess, sqlite3, argparse
 
 DEFAULT_DB_PATH = os.path.join(
-    os.path.expanduser("~"), ".local", "state", "gg", "repos.sqlite")
+    os.path.expanduser("~"), ".local", "state", "gg", "repos.sqlite"
+)
 
 COMPLETION_INSTALL_PATH = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "bash-completion",
-    "completions", "gg")
+    os.path.expanduser("~"),
+    ".local",
+    "share",
+    "bash-completion",
+    "completions",
+    "gg",
+)
 
 # Directories that `repo scan` never descends into.
 SCAN_SKIP_DIRS = {"node_modules"}
 
 BASH_COMPLETION = r"""
 _gg() {
-    local cur prev cmd sub i
+    local cur prev cmd sub i refs
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
 
@@ -125,7 +132,8 @@ _gg() {
         if [[ $cur == -* ]]; then
             COMPREPLY=($(compgen -W "-d --db -h --help" -- "$cur"))
         else
-            COMPREPLY=($(compgen -W "info branch rebase merge push pull fetch repo completion" -- "$cur"))
+            COMPREPLY=($(compgen -W "info branch rebase merge push pull
+                fetch repo completion" -- "$cur"))
             COMPREPLY+=($(compgen -d -- "$cur"))
         fi
         return
@@ -138,7 +146,9 @@ _gg() {
         branch)
             # Only the base is completable; the new name is free-form.
             if (( COMP_CWORD == i + 1 )); then
-                COMPREPLY=($(compgen -W "$(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null)" -- "$cur"))
+                refs=$(git for-each-ref --format='%(refname:short)' \
+                    refs/heads refs/remotes 2>/dev/null)
+                COMPREPLY=($(compgen -W "$refs" -- "$cur"))
             fi ;;
         rebase)
             COMPREPLY=($(compgen -W "-i --interactive" -- "$cur")) ;;
@@ -169,31 +179,43 @@ _gg() {
 complete -o filenames -F _gg gg
 """
 
+
 class GGError(Exception):
     pass
 
+
 # Git helpers
+
 
 def git(args, cwd=None):
     """Run git and return its stdout. Raises GGError on failure."""
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True
+    )
     if proc.returncode != 0:
-        raise GGError("git %s failed:\n%s" % (" ".join(args), proc.stderr.strip()))
+        raise GGError(
+            "git %s failed:\n%s" % (" ".join(args), proc.stderr.strip())
+        )
     return proc.stdout
+
 
 def git_try(args, cwd=None):
     """Run git and return its stripped stdout, or None on failure."""
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True
+    )
     if proc.returncode != 0:
         return None
     return proc.stdout.strip()
 
+
 def git_run(args, cwd=None):
-    """Run git attached to the terminal (for interactive/long-running commands)."""
+    """Run git attached to the terminal (interactive/long-running use)."""
     print("+ git " + " ".join(args), file=sys.stderr)
     proc = subprocess.run(["git", *args], cwd=cwd)
     if proc.returncode != 0:
         raise GGError("git %s failed." % " ".join(args))
+
 
 def repo_root(path):
     if not os.path.isdir(path):
@@ -203,28 +225,36 @@ def repo_root(path):
         raise GGError("Not a git repo: %s" % path)
     return os.path.realpath(root)
 
+
 def current_branch(root):
     name = git_try(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
     if not name:
         raise GGError("HEAD is detached; not on a branch.")
     return name
 
+
 def upstream_remote(root, branch):
     """The remote the branch tracks, defaulting to origin."""
-    remote = git_try(["config", "--get", "branch.%s.remote" % branch], cwd=root)
+    remote = git_try(
+        ["config", "--get", "branch.%s.remote" % branch], cwd=root
+    )
     if not remote or remote == ".":
         return "origin"
     return remote
+
 
 def collab_remotes(root, branch):
     # TODO: Use remote attributes once `gg repo remote` is implemented.
     return [upstream_remote(root, branch)]
 
+
 def mirror_remotes(root, branch):
     # TODO: Use remote attributes once `gg repo remote` is implemented.
     return []
 
+
 # DB helpers
+
 
 def open_db(path):
     parent = os.path.dirname(path)
@@ -235,15 +265,18 @@ def open_db(path):
     db.executescript(DB_SCHEMA)
     return db
 
+
 def add_repo(db, root):
     """Register a repo root. Returns (repo_id, was_added)."""
-    row = db.execute("select repo_id from repo where repo_root_path = ?",
-                     (root,)).fetchone()
+    row = db.execute(
+        "select repo_id from repo where repo_root_path = ?", (root,)
+    ).fetchone()
     if row is not None:
         return row["repo_id"], False
     cur = db.execute("insert into repo (repo_root_path) values (?)", (root,))
     db.commit()
     return cur.lastrowid, True
+
 
 def open_repo(db, path="."):
     """Resolve the repo containing path, registering it if needed."""
@@ -251,10 +284,13 @@ def open_repo(db, path="."):
     repo_id, _ = add_repo(db, root)
     return root, repo_id
 
+
 def get_branch(db, repo_id, name):
     return db.execute(
         "select * from branch where repo_id = ? and branch_name = ?",
-        (repo_id, name)).fetchone()
+        (repo_id, name),
+    ).fetchone()
+
 
 def require_base(db, root, repo_id):
     """Return (branch, base) for the current branch, which must have a base."""
@@ -264,7 +300,9 @@ def require_base(db, root, repo_id):
         raise GGError("Branch %s has no base recorded in gg." % name)
     return name, row["branch_base"]
 
+
 # Commands
+
 
 def cmd_info(db, args):
     root, repo_id = open_repo(db, args.path or ".")
@@ -274,7 +312,9 @@ def cmd_info(db, args):
         print("Branch:   (detached HEAD)")
         return
     print("Branch:   %s" % name)
-    upstream = git_try(["rev-parse", "--abbrev-ref", "%s@{upstream}" % name], cwd=root)
+    upstream = git_try(
+        ["rev-parse", "--abbrev-ref", "%s@{upstream}" % name], cwd=root
+    )
     print("Upstream: %s" % (upstream or "(none)"))
     row = get_branch(db, repo_id, name)
     if row is None:
@@ -284,11 +324,14 @@ def cmd_info(db, args):
     base = row["branch_base"]
     print("Base:     %s" % (base or "(none)"))
     if base:
-        counts = git_try(["rev-list", "--left-right", "--count",
-                          "%s...%s" % (base, name)], cwd=root)
+        counts = git_try(
+            ["rev-list", "--left-right", "--count", "%s...%s" % (base, name)],
+            cwd=root,
+        )
         if counts:
             behind, ahead = counts.split()
             print("vs base:  %s ahead, %s behind" % (ahead, behind))
+
 
 def cmd_branch(db, args):
     root, repo_id = open_repo(db)
@@ -304,20 +347,26 @@ def cmd_branch(db, args):
         "insert or replace into branch (repo_id, branch_name, branch_base,"
         " branch_type, branch_is_mirror, branch_is_collab)"
         " values (?, ?, ?, 'STORY', 0, 0)",
-        (repo_id, args.new, new_base))
+        (repo_id, args.new, new_base),
+    )
     db.commit()
     git_run(["push", "-u", "origin", args.new], cwd=root)
     print("Created %s with base %s." % (args.new, new_base))
 
+
 def cmd_rebase(db, args):
     root, repo_id = open_repo(db)
     _, base = require_base(db, root, repo_id)
-    git_run(["rebase"] + (["-i"] if args.interactive else []) + [base], cwd=root)
+    git_run(
+        ["rebase"] + (["-i"] if args.interactive else []) + [base], cwd=root
+    )
+
 
 def cmd_merge(db, args):
     root, repo_id = open_repo(db)
     _, base = require_base(db, root, repo_id)
     git_run(["merge", base], cwd=root)
+
 
 def cmd_push(db, args):
     root = repo_root(".")
@@ -328,19 +377,26 @@ def cmd_push(db, args):
     for remote in remotes:
         git_run(["push"] + force + [remote, name], cwd=root)
 
+
 def cmd_pull(db, args):
     root = repo_root(".")
     name = current_branch(root)
     for remote in collab_remotes(root, name):
         git_run(["pull", remote, name], cwd=root)
 
+
 def cmd_fetch(db, args):
     git_run(["fetch", "--all", "--prune"], cwd=repo_root("."))
+
 
 def cmd_repo_init(db, args):
     root = repo_root(args.path or ".")
     repo_id, added = add_repo(db, root)
-    print("%s repo %d: %s" % ("Added" if added else "Already known:", repo_id, root))
+    print(
+        "%s repo %d: %s"
+        % ("Added" if added else "Already known:", repo_id, root)
+    )
+
 
 def cmd_repo_scan(db, args):
     top = os.path.realpath(args.path)
@@ -366,16 +422,22 @@ def cmd_repo_scan(db, args):
         if args.max_depth is not None and depth >= args.max_depth:
             dirnames[:] = []
         else:
-            dirnames[:] = [d for d in dirnames
-                           if not d.startswith(".") and d not in SCAN_SKIP_DIRS]
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if not d.startswith(".") and d not in SCAN_SKIP_DIRS
+            ]
     print("%d repo(s) added, %d already known." % (added, known))
 
+
 def cmd_repo_list(db, args):
-    for row in db.execute("select repo_id, repo_root_path from repo"
-                          " order by repo_root_path"):
+    for row in db.execute(
+        "select repo_id, repo_root_path from repo order by repo_root_path"
+    ):
         path = row["repo_root_path"]
         missing = "" if os.path.isdir(path) else "  (missing)"
         print("%4d  %s%s" % (row["repo_id"], path, missing))
+
 
 def cmd_completion(db, args):
     if not args.install:
@@ -386,13 +448,19 @@ def cmd_completion(db, args):
         f.write(BASH_COMPLETION.lstrip())
     print("Installed bash completion to %s" % COMPLETION_INSTALL_PATH)
 
+
 def cmd_repo_branches(db, args):
     root, repo_id = open_repo(db, args.path or ".")
     current = git_try(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
-    local = git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
-                cwd=root).split()
-    rows = {row["branch_name"]: row for row in db.execute(
-        "select * from branch where repo_id = ?", (repo_id,))}
+    local = git(
+        ["for-each-ref", "--format=%(refname:short)", "refs/heads/"], cwd=root
+    ).split()
+    rows = {
+        row["branch_name"]: row
+        for row in db.execute(
+            "select * from branch where repo_id = ?", (repo_id,)
+        )
+    }
     names = sorted(set(local) | set(rows))
     if not names:
         print("No branches.")
@@ -404,19 +472,34 @@ def cmd_repo_branches(db, args):
         if row is None:
             info = "(untracked)"
         else:
-            info = "%-7s  base: %s" % (row["branch_type"] or "?",
-                                       row["branch_base"] or "(none)")
+            info = "%-7s  base: %s" % (
+                row["branch_type"] or "?",
+                row["branch_base"] or "(none)",
+            )
             if name not in local:
                 info += "  (gone)"
         print("%s %-*s  %s" % (marker, width, name, info))
 
+
 # Argument parsing
 
-COMMANDS = {"info", "branch", "rebase", "merge", "push", "pull", "fetch", "repo",
-            "completion"}
+COMMANDS = {
+    "info",
+    "branch",
+    "rebase",
+    "merge",
+    "push",
+    "pull",
+    "fetch",
+    "repo",
+    "completion",
+}
+
 
 def normalize_argv(argv):
-    """Allow `gg [<repo-root-path>]` by inserting the implicit `info` command."""
+    """Allow `gg [<repo-root-path>]` by inserting the implicit `info`
+    command.
+    """
     i = 0
     while i < len(argv):
         if argv[i] in ("-d", "--db"):
@@ -429,22 +512,31 @@ def normalize_argv(argv):
         argv = argv[:i] + ["info"] + argv[i:]
     return argv
 
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="gg", description="Greater Git")
-    parser.add_argument("-d", "--db", default=DEFAULT_DB_PATH,
-                        help="gg DB path (default: %(default)s)")
+    parser.add_argument(
+        "-d",
+        "--db",
+        default=DEFAULT_DB_PATH,
+        help="gg DB path (default: %(default)s)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("info", help="show info about the current branch")
     p.add_argument("path", nargs="?")
     p.set_defaults(func=cmd_info)
 
-    p = sub.add_parser("branch", help="create a branch from a base and push it")
+    p = sub.add_parser(
+        "branch", help="create a branch from a base and push it"
+    )
     p.add_argument("base")
     p.add_argument("new")
     p.set_defaults(func=cmd_branch)
 
-    p = sub.add_parser("rebase", help="rebase the current branch against its base")
+    p = sub.add_parser(
+        "rebase", help="rebase the current branch against its base"
+    )
     p.add_argument("-i", "--interactive", action="store_true")
     p.set_defaults(func=cmd_rebase)
 
@@ -452,8 +544,12 @@ def build_parser():
     p.set_defaults(func=cmd_merge)
 
     p = sub.add_parser("push", help="push to collab and mirror remotes")
-    p.add_argument("-f", "--force", action="store_true",
-                   help="push with --force-with-lease")
+    p.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="push with --force-with-lease",
+    )
     p.set_defaults(func=cmd_push)
 
     p = sub.add_parser("pull", help="pull from collab remotes")
@@ -463,8 +559,11 @@ def build_parser():
     p.set_defaults(func=cmd_fetch)
 
     p = sub.add_parser("completion", help="print a bash completion script")
-    p.add_argument("--install", action="store_true",
-                   help="write it to %s instead" % COMPLETION_INSTALL_PATH)
+    p.add_argument(
+        "--install",
+        action="store_true",
+        help="write it to %s instead" % COMPLETION_INSTALL_PATH,
+    )
     p.set_defaults(func=cmd_completion)
 
     repo = sub.add_parser("repo", help="manage repos in the gg DB")
@@ -488,6 +587,7 @@ def build_parser():
 
     return parser
 
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -500,6 +600,6 @@ def main(argv=None):
         return 1
     return 0
 
+
 if __name__ == "__main__":
     sys.exit(main())
-
