@@ -55,7 +55,8 @@ import sys
 # Scan the given path and subdirs for any git repos to add to the database.
 # $ gg repo scan [--max-depth n] <scan-path>
 #
-# Add the specified repo (default: the one containing the cwd) to the database.
+# Add the specified repo (default: the one containing the cwd) to the database,
+# recording its main branch (from <first-remote>/HEAD) as a MAIN branch.
 # $ gg repo init [<repo-path>]
 #
 # Add/remove type(s) and/or attribute(s) for the specified remote.
@@ -247,6 +248,21 @@ def upstream_remote(root, branch):
     return remote
 
 
+def detect_main_branch(root):
+    """The main branch per the first remote's HEAD, or None if unknown."""
+    remotes = (git_try(["remote"], cwd=root) or "").split()
+    if not remotes:
+        return None
+    remote = remotes[0]
+    ref = git_try(
+        ["rev-parse", "--abbrev-ref", "%s/HEAD" % remote], cwd=root
+    )
+    prefix = remote + "/"
+    if not ref or not ref.startswith(prefix) or ref == prefix + "HEAD":
+        return None
+    return ref[len(prefix) :]
+
+
 def collab_remotes(root, branch):
     # TODO: Use remote attributes once `gg repo remote` is implemented.
     return [upstream_remote(root, branch)]
@@ -400,6 +416,22 @@ def cmd_repo_init(db, args):
         "%s repo %d: %s"
         % ("Added" if added else "Already known:", repo_id, root)
     )
+    main = detect_main_branch(root)
+    if main is None:
+        print(
+            "Could not detect main branch (no remote, or its HEAD is unset).",
+            file=sys.stderr,
+        )
+        return
+    db.execute(
+        "insert into branch (repo_id, branch_name, branch_type)"
+        " values (?, ?, 'MAIN')"
+        " on conflict (repo_id, branch_name)"
+        " do update set branch_type = 'MAIN'",
+        (repo_id, main),
+    )
+    db.commit()
+    print("Main branch: %s" % main)
 
 
 def cmd_repo_scan(db, args):
