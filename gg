@@ -76,6 +76,23 @@ import sys
 # or install it to ~/.local/share/bash-completion/completions/gg with
 # --install.
 # $ gg completion [--install]
+#
+# List recent branches. By default it uses -n20.
+# This is equivalent to git branch --sort=-committerdate
+# (alias: rb = recent-branches)
+# $ gg recent-branches [-n<n>] [-v]
+#
+# Same as git diff, except the default refspec is "--merge-base base-branch".
+# The -G switch filters out any generated files (files that match
+# m{/[Gg]enerated/}). Switches -n and --no translate to --name-only and -s and
+# --ns translate to --name-status.
+# (alias: dn = diff -n)
+# $ gg diff [-n | --no | -s | --ns] [<refspec>] [--cached] [-G]
+#
+# Shows the log with preferred options.
+# By default, equivalent to: git log --oneline --merge-base base-branch
+# The -v or -m flag cancels --oneline; -f gives --format=fuller.
+# $ gg log [-n<n>] [<refspec>] [-v | -m | -f]
 
 # Database setup
 DB_SCHEMA = """
