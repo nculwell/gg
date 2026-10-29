@@ -3,9 +3,12 @@
 
 import argparse
 import os
+import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 # GREATER GIT
 #
@@ -85,9 +88,10 @@ import sys
 # Same as git diff, except the default refspec is "--merge-base base-branch".
 # The -G switch filters out any generated files (files that match
 # m{/[Gg]enerated/}). Switches -n and --no translate to --name-only and -s and
-# --ns translate to --name-status.
+# --ns translate to --name-status. Untracked files are included unless -U is
+# given; -D ignores deleted files.
 # (alias: dn = diff -n)
-# $ gg diff [-n | --no | -s | --ns] [<refspec>] [--cached] [-G]
+# $ gg diff [-n | --no | -s | --ns] [<refspec>] [--cached] [-G] [-U] [-D]
 #
 # Shows the log with preferred options.
 # By default, equivalent to: git log --oneline --merge-base base-branch
@@ -157,7 +161,8 @@ _gg() {
             COMPREPLY=($(compgen -W "-d --db -h --help" -- "$cur"))
         else
             COMPREPLY=($(compgen -W "info branch rebase merge push pull
-                fetch repo completion" -- "$cur"))
+                fetch repo completion recent-branches rb diff dn
+                log" -- "$cur"))
             COMPREPLY+=($(compgen -d -- "$cur"))
         fi
         return
@@ -202,6 +207,21 @@ _gg() {
             fi ;;
         completion)
             COMPREPLY=($(compgen -W "--install" -- "$cur")) ;;
+        recent-branches|rb)
+            COMPREPLY=($(compgen -W "-n -v" -- "$cur")) ;;
+        diff|dn|log)
+            if [[ $cur == -* ]]; then
+                if [[ $cmd == log ]]; then
+                    COMPREPLY=($(compgen -W "-n -v -m -f" -- "$cur"))
+                else
+                    COMPREPLY=($(compgen -W "-n --no -s --ns --cached -G -U
+                        -D" -- "$cur"))
+                fi
+            elif [[ $prev != -n ]]; then
+                refs=$(git for-each-ref --format='%(refname:short)' \
+                    refs/heads refs/remotes 2>/dev/null)
+                COMPREPLY=($(compgen -W "$refs" -- "$cur"))
+            fi ;;
         repo)
             if (( COMP_CWORD == i + 1 )); then
                 COMPREPLY=($(compgen -W "scan init list branches" -- "$cur"))
@@ -233,10 +253,15 @@ class GGError(Exception):
 # Git helpers
 
 
-def git(args, cwd=None):
+def git(args, cwd=None, env=None):
     """Run git and return its stdout. Raises GGError on failure."""
     proc = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if proc.returncode != 0:
         raise GGError(
@@ -261,6 +286,14 @@ def git_run(args, cwd=None):
     proc = subprocess.run(["git", *args], cwd=cwd, check=False)
     if proc.returncode != 0:
         raise GGError("git %s failed." % " ".join(args))
+
+
+def git_view(args, cwd=None, env=None):
+    """Run git attached to the terminal without echoing the command, for
+    commands that just display output. Returns git's exit code.
+    """
+    proc = subprocess.run(["git", *args], cwd=cwd, env=env, check=False)
+    return proc.returncode
 
 
 def repo_root(path):
@@ -562,6 +595,102 @@ def cmd_repo_branches(db, args):
         print("%s %-*s  %s" % (marker, width, name, info))
 
 
+def cmd_recent_branches(db, args):
+    cmd = ["branch", "--sort=-committerdate"]
+    if args.verbose:
+        cmd.append("-v")
+    if sys.stdout.isatty():
+        cmd.append("--color=always")
+    lines = git(cmd, cwd=repo_root(".")).splitlines()
+    for line in lines[: args.count]:
+        print(line)
+
+
+GENERATED_RE = re.compile(r"/[Gg]enerated/")
+
+
+def untracked_index_env(root, tmpdir):
+    """Return an env whose GIT_INDEX_FILE is a copy of the real index with
+    untracked files added as intent-to-add, so diffs show them as new files.
+    Returns None if there are no untracked files.
+    """
+    untracked = git(
+        ["ls-files", "--others", "--exclude-standard", "-z"], cwd=root
+    )
+    if not untracked:
+        return None
+    index = os.path.join(
+        root, git(["rev-parse", "--git-path", "index"], cwd=root).strip()
+    )
+    tmp_index = os.path.join(tmpdir, "index")
+    if os.path.exists(index):
+        shutil.copyfile(index, tmp_index)
+    pathspec_file = os.path.join(tmpdir, "untracked")
+    with open(pathspec_file, "w") as f:
+        f.write(untracked)
+    env = dict(os.environ, GIT_INDEX_FILE=tmp_index)
+    git(
+        [
+            "--literal-pathspecs",
+            "add",
+            "-N",
+            "--pathspec-from-file=" + pathspec_file,
+            "--pathspec-file-nul",
+        ],
+        cwd=root,
+        env=env,
+    )
+    return env
+
+
+def cmd_diff(db, args):
+    root, repo_id = open_repo(db)
+    if args.refspec:
+        refspec = [args.refspec]
+    else:
+        _, base = require_base(db, root, repo_id)
+        refspec = ["--merge-base", base]
+    opts = (["--diff-filter=d"] if args.no_deleted else []) + (
+        ["--cached"] if args.cached else []
+    )
+    with tempfile.TemporaryDirectory(prefix="gg-") as tmpdir:
+        env = None if args.no_untracked else untracked_index_env(root, tmpdir)
+        paths = []
+        if args.no_generated:
+            names = git(
+                ["diff", "--name-only", "-z", *opts, *refspec],
+                cwd=root,
+                env=env,
+            ).split("\0")
+            files = [n for n in names if n and not GENERATED_RE.search(n)]
+            if not files:
+                return 0
+            paths = ["--", *files]
+        fmt = [args.format] if args.format else []
+        return git_view(
+            ["--literal-pathspecs", "diff", *fmt, *opts, *refspec, *paths],
+            cwd=root,
+            env=env,
+        )
+
+
+def cmd_log(db, args):
+    root, repo_id = open_repo(db)
+    if args.refspec:
+        refspec = args.refspec
+    else:
+        _, base = require_base(db, root, repo_id)
+        refspec = "%s..HEAD" % base
+    cmd = ["log"]
+    if args.fuller:
+        cmd.append("--format=fuller")
+    elif not args.verbose:
+        cmd.append("--oneline")
+    if args.count is not None:
+        cmd.append("-n%d" % args.count)
+    return git_view(cmd + [refspec], cwd=root)
+
+
 # Argument parsing
 
 COMMANDS = {
@@ -574,12 +703,20 @@ COMMANDS = {
     "fetch",
     "repo",
     "completion",
+    "recent-branches",
+    "diff",
+    "log",
+}
+
+ALIASES = {
+    "rb": ["recent-branches"],
+    "dn": ["diff", "-n"],
 }
 
 
 def normalize_argv(argv):
     """Allow `gg [<repo-root-path>]` by inserting the implicit `info`
-    command.
+    command, and expand command aliases.
     """
     i = 0
     while i < len(argv):
@@ -589,6 +726,8 @@ def normalize_argv(argv):
             i += 1
         else:
             break
+    if i < len(argv) and argv[i] in ALIASES:
+        argv = argv[:i] + ALIASES[argv[i]] + argv[i + 1 :]
     if i >= len(argv) or argv[i] not in COMMANDS:
         argv = argv[:i] + ["info"] + argv[i:]
     return argv
@@ -667,6 +806,66 @@ def build_parser():
     )
     p.set_defaults(func=cmd_completion)
 
+    p = sub.add_parser("recent-branches", help="list recent branches")
+    p.add_argument(
+        "-n", dest="count", type=int, default=20, help="(default: 20)"
+    )
+    p.add_argument("-v", dest="verbose", action="store_true")
+    p.set_defaults(func=cmd_recent_branches)
+
+    p = sub.add_parser("diff", help="diff against the base (or a refspec)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "-n",
+        "--no",
+        dest="format",
+        action="store_const",
+        const="--name-only",
+        help="--name-only",
+    )
+    g.add_argument(
+        "-s",
+        "--ns",
+        dest="format",
+        action="store_const",
+        const="--name-status",
+        help="--name-status",
+    )
+    p.add_argument("--cached", action="store_true")
+    p.add_argument(
+        "-G",
+        dest="no_generated",
+        action="store_true",
+        help="filter out generated files",
+    )
+    p.add_argument(
+        "-U",
+        dest="no_untracked",
+        action="store_true",
+        help="skip untracked files",
+    )
+    p.add_argument(
+        "-D",
+        dest="no_deleted",
+        action="store_true",
+        help="ignore deleted files",
+    )
+    p.add_argument(
+        "refspec", nargs="?", help="(default: --merge-base <base>)"
+    )
+    p.set_defaults(func=cmd_diff)
+
+    p = sub.add_parser("log", help="log the commits since the base")
+    p.add_argument("-n", dest="count", type=int)
+    p.add_argument(
+        "-v", "-m", dest="verbose", action="store_true", help="not --oneline"
+    )
+    p.add_argument(
+        "-f", dest="fuller", action="store_true", help="--format=fuller"
+    )
+    p.add_argument("refspec", nargs="?", help="(default: <base>..HEAD)")
+    p.set_defaults(func=cmd_log)
+
     repo = sub.add_parser("repo", help="manage repos in the gg DB")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True)
 
@@ -695,11 +894,10 @@ def main(argv=None):
     args = build_parser().parse_args(normalize_argv(argv))
     try:
         db = open_db(args.db)
-        args.func(db, args)
+        return args.func(db, args) or 0
     except GGError as e:
         print("gg: %s" % e, file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
