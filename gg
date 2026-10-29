@@ -40,6 +40,9 @@ import tempfile
 # base. If the base is a STORY branch, the new branch copies the base's base.
 # $ gg branch <base-branch-name> <new-branch-name>
 #
+# Set the base branch for the current branch.
+# $ gg base <base-branch-name>
+#
 # Rebase the current branch against its base.
 # $ gg rebase [-i]
 #
@@ -160,7 +163,7 @@ _gg() {
         if [[ $cur == -* ]]; then
             COMPREPLY=($(compgen -W "-d --db -h --help" -- "$cur"))
         else
-            COMPREPLY=($(compgen -W "info branch rebase merge push pull
+            COMPREPLY=($(compgen -W "info branch base rebase merge push pull
                 fetch repo completion recent-branches rb diff dn
                 log" -- "$cur"))
             COMPREPLY+=($(compgen -d -- "$cur"))
@@ -172,8 +175,8 @@ _gg() {
     case $cmd in
         info)
             COMPREPLY=($(compgen -d -- "$cur")) ;;
-        branch)
-            # Only the base is completable; the new name is free-form.
+        branch|base)
+            # Only the base is completable; branch's new name is free-form.
             if (( COMP_CWORD == i + 1 )); then
                 refs=$(git for-each-ref --format='%(refname:short)' \
                     refs/heads refs/remotes 2>/dev/null)
@@ -448,6 +451,23 @@ def cmd_branch(db, args):
     print("Created %s with base %s." % (args.new, new_base))
 
 
+def cmd_base(db, args):
+    root, repo_id = open_repo(db)
+    name = current_branch(root)
+    if git_try(["rev-parse", "--verify", "-q", args.base], cwd=root) is None:
+        raise GGError("No such branch: %s" % args.base)
+    db.execute(
+        "insert into branch (repo_id, branch_name, branch_base, branch_type,"
+        " branch_is_mirror, branch_is_collab)"
+        " values (?, ?, ?, 'STORY', 0, 0)"
+        " on conflict (repo_id, branch_name)"
+        " do update set branch_base = excluded.branch_base",
+        (repo_id, name, args.base),
+    )
+    db.commit()
+    print("Set base of %s to %s." % (name, args.base))
+
+
 def cmd_rebase(db, args):
     root, repo_id = open_repo(db)
     _, base = require_base(db, root, repo_id)
@@ -696,6 +716,7 @@ def cmd_log(db, args):
 COMMANDS = {
     "info",
     "branch",
+    "base",
     "rebase",
     "merge",
     "push",
@@ -753,6 +774,10 @@ def build_parser():
     p.add_argument("base")
     p.add_argument("new")
     p.set_defaults(func=cmd_branch)
+
+    p = sub.add_parser("base", help="set the current branch's base")
+    p.add_argument("base")
+    p.set_defaults(func=cmd_base)
 
     p = sub.add_parser(
         "rebase", help="rebase the current branch against its base"
